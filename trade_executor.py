@@ -47,118 +47,88 @@ def backtest_strategy(start_date: datetime, end_date: datetime, initial_capital:
     daily_returns = []
     max_value = initial_capital
     
-    print("Fetching historical price data...")
     try:
-        # Fetch all data at once instead of chunks
+        # Fetch all data at once
         data = fetch_crypto_data(
             tickers,
-            start=start_date - timedelta(days=30),  # Extra 30 days for initial calculation
+            start=start_date - timedelta(days=30),
             end=end_date,
             interval='1d'
         )
         
-        # Convert to DataFrame if single ticker
         if isinstance(data, pd.Series):
             data = pd.DataFrame({tickers[0]: data})
             
         dates = data.index[data.index >= start_date]
-        print(f"Successfully loaded {len(dates)} days of historical data")
+        
     except Exception as e:
-        print(f"Error fetching historical data: {str(e)}")
         return {'error': str(e)}
 
-    print("\nStarting simulation...")
     total_days = len(dates)
-    
-    # Pre-calculate all allocations using vectorized operations
-    print("Pre-calculating allocations...")
-    window = 30  # 30-day lookback
+    window = 30
     allocations = {}
     
-    # Create a sliding window of returns
+    # Pre-calculate allocations
     for i in range(window, len(data)):
-        if i % 20 == 0:
-            print(f"Calculating allocations: {(i/len(data))*100:.1f}%")
+        progress = (i / len(data)) * 40  # First 40% for allocations
+        print(f"Backtesting: {progress:.1f}%", end="\r")
         
         window_data = data.iloc[i-window:i]
         returns = calculate_returns(window_data)
         optimal_weights = optimize_portfolio(returns)
-        allocations[data.index[i]] = dict(zip(tickers, optimal_weights * 100))  # Convert to percentages
+        allocations[data.index[i]] = dict(zip(tickers, optimal_weights * 100))
 
-    # Vectorize portfolio calculations
-    print("\nRunning trading simulation...")
+    # Run simulation
     for day_index, current_date in enumerate(dates):
-        if day_index % 20 == 0:
-            progress = (day_index + 1) / total_days * 100
-            print(f"Progress: {progress:.1f}% ({day_index + 1}/{total_days} days)")
+        progress = 40 + ((day_index + 1) / total_days * 60)  # Remaining 60% for simulation
+        print(f"Backtesting: {progress:.1f}%", end="\r")
             
         try:
-            # Get allocation for this date
             allocation = allocations.get(current_date)
             if not allocation:
                 continue
                 
-            # Calculate current portfolio value using vectorized operations
             current_prices = data.loc[current_date]
             holdings_value = sum(current_holdings[ticker] * current_prices[ticker] for ticker in tickers)
             current_value = holdings_value + current_cash
             max_value = max(max_value, current_value)
             
-            # Calculate target amounts
             target_amounts = {ticker: (alloc/100.0) * current_value for ticker, alloc in allocation.items()}
             
-            # Prepare proposed trades for GPT analysis
-            proposed_trades = []
+            # Execute trades
             for ticker in tickers:
                 current_price = current_prices[ticker]
                 current_value = current_holdings[ticker] * current_price
                 target_value = target_amounts.get(ticker, 0.0)
                 trade_amount = target_value - current_value
                 
-                if abs(trade_amount) > 1.0:  # Minimum trade size
-                    proposed_trades.append({
-                        'ticker': ticker,
-                        'type': 'buy' if trade_amount > 0 else 'sell',
-                        'amount': abs(trade_amount),
-                        'price': current_price
-                    })
+                if abs(trade_amount) > 1.0:
+                    fees = calculate_fees(abs(trade_amount))
+                    if trade_amount > 0 and current_cash >= (trade_amount + fees):
+                        shares = trade_amount / current_price
+                        current_holdings[ticker] += shares
+                        current_cash -= (trade_amount + fees)
+                        trade_history.append({
+                            'timestamp': current_date,
+                            'ticker': ticker,
+                            'type': 'buy',
+                            'amount': trade_amount,
+                            'price': current_price,
+                            'fees': fees
+                        })
+                    elif trade_amount < 0 and current_holdings[ticker] >= abs(trade_amount) / current_price:
+                        shares = abs(trade_amount) / current_price
+                        current_holdings[ticker] -= shares
+                        current_cash += abs(trade_amount) - fees
+                        trade_history.append({
+                            'timestamp': current_date,
+                            'ticker': ticker,
+                            'type': 'sell',
+                            'amount': abs(trade_amount),
+                            'price': current_price,
+                            'fees': fees
+                        })
             
-            # Get GPT analysis for trades
-            if proposed_trades:
-                analysis = analyze_with_gpt(current_prices, data, proposed_trades)
-                if analysis['recommendations'] == 'reject':
-                    print("GPT recommends against these trades. Skipping day.")
-                    continue
-            
-            # Execute approved trades
-            for trade in proposed_trades:
-                fees = calculate_fees(trade['amount'])
-                if trade['type'] == 'buy' and current_cash >= (trade['amount'] + fees):
-                    shares = trade['amount'] / trade['price']
-                    current_holdings[trade['ticker']] += shares
-                    current_cash -= (trade['amount'] + fees)
-                    trade_history.append({
-                        'timestamp': current_date,
-                        'ticker': trade['ticker'],
-                        'type': 'buy',
-                        'amount': trade['amount'],
-                        'price': trade['price'],
-                        'fees': fees
-                    })
-                elif trade['type'] == 'sell' and current_holdings[trade['ticker']] >= trade['amount'] / trade['price']:
-                    shares = trade['amount'] / trade['price']
-                    current_holdings[trade['ticker']] -= shares
-                    current_cash += trade['amount'] - fees
-                    trade_history.append({
-                        'timestamp': current_date,
-                        'ticker': trade['ticker'],
-                        'type': 'sell',
-                        'amount': trade['amount'],
-                        'price': trade['price'],
-                        'fees': fees
-                    })
-            
-            # Record daily portfolio value
             portfolio_value = sum(current_holdings[ticker] * current_prices[ticker] for ticker in tickers) + current_cash
             portfolio_history.append({
                 'date': current_date,
@@ -166,18 +136,13 @@ def backtest_strategy(start_date: datetime, end_date: datetime, initial_capital:
                 'cash': current_cash
             })
             
-            # Calculate daily return
             if len(portfolio_history) > 1:
                 daily_return = (portfolio_value / portfolio_history[-2]['value']) - 1
                 daily_returns.append(daily_return)
                 
         except Exception as e:
-            print(f"Warning: Error processing day {current_date.strftime('%Y-%m-%d')}: {str(e)}")
             continue
     
-    print("\nSimulation completed. Calculating performance metrics...")
-    
-    # Calculate performance metrics
     if portfolio_history:
         final_value = portfolio_history[-1]['value']
         total_return = (final_value / initial_capital) - 1
@@ -198,21 +163,49 @@ def backtest_strategy(start_date: datetime, end_date: datetime, initial_capital:
         'portfolio_history': portfolio_history
     }
 
-def analyze_with_gpt(current_prices: Dict[str, float], historical_data: pd.DataFrame, proposed_trades: List[Dict[str, Any]]) -> Dict[str, Any]:
+def calculate_price_changes(historical_data: pd.DataFrame, current_date: datetime, ticker: str) -> tuple[float, float]:
+    """
+    Calculate 24h and 7d price changes using proper date handling.
+    
+    Args:
+        historical_data: DataFrame with DateTimeIndex and price data
+        current_date: The date for which to calculate changes
+        ticker: The ticker symbol to analyze
+    
+    Returns:
+        tuple of (24h_change_pct, 7d_change_pct)
+    """
+    try:
+        # Get current price
+        current_price = float(historical_data.loc[current_date][ticker])
+        
+        # Calculate 24h change
+        one_day_ago = current_date - timedelta(days=1)
+        prev_day_data = historical_data[historical_data.index <= one_day_ago].iloc[-1]
+        daily_change = ((current_price - float(prev_day_data[ticker])) / float(prev_day_data[ticker])) * 100
+        
+        # Calculate 7d change
+        seven_days_ago = current_date - timedelta(days=7)
+        week_ago_data = historical_data[historical_data.index <= seven_days_ago].iloc[-1]
+        week_change = ((current_price - float(week_ago_data[ticker])) / float(week_ago_data[ticker])) * 100
+        
+        return daily_change, week_change
+        
+    except Exception as e:
+        print(f"Error calculating changes for {ticker}: {e}")
+        return 0.0, 0.0
+
+def analyze_with_gpt(current_prices: Dict[str, float], historical_data: pd.DataFrame, proposed_trades: List[Dict[str, Any]], current_date: datetime) -> Dict[str, Any]:
     """Use GPT to analyze market conditions and validate trades."""
     print("\n" + "="*50)
     print("CALLING GPT FOR ANALYSIS")
     print("="*50)
     
     try:
-        # Prepare market context with more data
+        # Prepare market context with more accurate data
         market_summary = []
         for ticker, price in current_prices.items():
-            prev_price = historical_data[ticker].iloc[-2]
-            print(f"prev_price: {prev_price}    price: {price}")
-            daily_change = ((price - prev_price) / prev_price) * 100
-            print(f"daily_change: {daily_change}")
-            week_change = ((price - historical_data[ticker].iloc[-7]) / historical_data[ticker].iloc[-7]) * 100
+            daily_change, week_change = calculate_price_changes(historical_data, current_date, ticker)
             market_summary.append(
                 f"{ticker}: ${price:.2f} (24h: {daily_change:+.2f}%, 7d: {week_change:+.2f}%)"
             )
@@ -364,7 +357,7 @@ def execute_trades(
 
     # Get GPT analysis if we have market data
     if current_prices and historical_data and proposed_trades:
-        analysis = analyze_with_gpt(current_prices, historical_data, proposed_trades)
+        analysis = analyze_with_gpt(current_prices, historical_data, proposed_trades, datetime.now())
         print("\nGPT Analysis:")
         print(f"Risk Level: {analysis['risk_level']}")
         print(f"Insights: {analysis['insights']}")

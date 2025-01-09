@@ -3,101 +3,88 @@ from datetime import datetime
 import matplotlib.pyplot as plt
 import pandas as pd
 import numpy as np
+from typing import List, Dict, Any
 
-def run_backtest():
-    # Test parameters
-    tickers = ['BTC-USD', 'ETH-USD', 'XRP-USD', 'LTC-USD', 'ADA-USD']
-    start_date = datetime(2024, 8, 15)  # Just December 2023
-    end_date = datetime(2024, 12, 31)
+def main():
+    """Run backtest simulation."""
+    start_date = datetime(2024, 12, 1)
+    end_date = datetime(2025, 1, 7)
     initial_capital = 100000.0
-
-    print("\n" + "="*50)
-    print("Starting Crypto Trading Backtest")
-    print("="*50)
-    print(f"Period: {start_date.strftime('%Y-%m-%d')} to {end_date.strftime('%Y-%m-%d')}")
-    print(f"Initial Capital: ${initial_capital:,.2f}")
-    print("Assets:", ", ".join(tickers))
-    print("="*50 + "\n")
-
-    # Run backtest
+    tickers = ['BTC-USD', 'ETH-USD', 'SOL-USD', 'DOGE-USD', 'ADA-USD']
+    
+    print(f"\nRunning backtest from {start_date.strftime('%Y-%m-%d')} to {end_date.strftime('%Y-%m-%d')}")
+    print(f"Initial capital: ${initial_capital:,.2f}")
+    print(f"Tickers: {', '.join(tickers)}\n")
+    
     results = backtest_strategy(start_date, end_date, initial_capital, tickers)
     
     if 'error' in results:
-        print(f"\nBacktest failed: {results['error']}")
+        print(f"Error running backtest: {results['error']}")
         return
-
-    # Convert portfolio history to DataFrame once for all calculations
-    df = pd.DataFrame(results['portfolio_history'])
-    trades = pd.DataFrame(results['trade_history'])
     
-    # Calculate all metrics
-    daily_returns = df['value'].pct_change().dropna()
-    total_return = (df['value'].iloc[-1] / initial_capital) - 1
-    annualized_return = ((1 + total_return) ** (252 / len(df)) - 1) * 100
-    volatility = daily_returns.std() * np.sqrt(252) * 100
-    sharpe_ratio = (np.mean(daily_returns) * 252) / (np.std(daily_returns) * np.sqrt(252))
-    max_drawdown = ((df['value'].cummax() - df['value']) / df['value'].cummax()).max() * 100
-    
-    # Print final summary
     print("\n" + "="*50)
-    print("BACKTEST SUMMARY")
+    print("BACKTEST RESULTS")
     print("="*50)
     
-    # Performance metrics
-    print("\nPERFORMANCE METRICS:")
-    print(f"{'Initial Capital:':<25} ${initial_capital:,.2f}")
-    print(f"{'Final Portfolio Value:':<25} ${df['value'].iloc[-1]:,.2f}")
-    print(f"{'Total Return:':<25} {total_return*100:,.2f}%")
-    print(f"{'Annualized Return:':<25} {annualized_return:,.2f}%")
-    print(f"{'Annualized Volatility:':<25} {volatility:,.2f}%")
-    print(f"{'Sharpe Ratio:':<25} {sharpe_ratio:.2f}")
-    print(f"{'Maximum Drawdown:':<25} {max_drawdown:.2f}%")
+    print(f"\nFinal Portfolio Value: ${results['final_value']:,.2f}")
+    print(f"Total Return: {results['total_return']*100:.2f}%")
+    print(f"Sharpe Ratio: {results['sharpe_ratio']:.2f}")
+    print(f"Maximum Drawdown: {results['max_drawdown']*100:.2f}%")
     
-    if not trades.empty:
-        # Trading statistics
-        print("\nTRADING STATISTICS:")
-        total_trades = len(trades)
-        total_fees = trades['fees'].sum()
-        buy_trades = (trades['type'] == 'buy').sum()
-        sell_trades = total_trades - buy_trades
-        avg_trade_size = trades['amount'].mean()
-        
-        print(f"{'Total Trades:':<25} {total_trades:,}")
-        print(f"{'Buy Trades:':<25} {buy_trades:,}")
-        print(f"{'Sell Trades:':<25} {sell_trades:,}")
-        print(f"{'Average Trade Size:':<25} ${avg_trade_size:,.2f}")
-        print(f"{'Total Fees Paid:':<25} ${total_fees:,.2f}")
-        print(f"{'Fees % of Capital:':<25} {(total_fees/initial_capital)*100:.2f}%")
+    # Calculate annualized metrics
+    days = (end_date - start_date).days
+    annualized_return = ((1 + results['total_return']) ** (365/days) - 1) * 100
+    annualized_volatility = np.std([t['value']/results['portfolio_history'][i-1]['value'] - 1 
+                                  for i, t in enumerate(results['portfolio_history'][1:])]) * np.sqrt(252) * 100
     
-    print("\n" + "="*50)
-
+    print(f"Annualized Return: {annualized_return:.2f}%")
+    print(f"Annualized Volatility: {annualized_volatility:.2f}%")
+    
+    # Trade statistics
+    buy_trades = [t for t in results['trade_history'] if t['type'] == 'buy']
+    sell_trades = [t for t in results['trade_history'] if t['type'] == 'sell']
+    total_fees = sum(t['fees'] for t in results['trade_history'])
+    
+    print(f"\nTotal Trades: {len(results['trade_history'])}")
+    print(f"Buy Trades: {len(buy_trades)}")
+    print(f"Sell Trades: {len(sell_trades)}")
+    print(f"Total Fees Paid: ${total_fees:,.2f}")
+    
     # Plot results
-    plot_results(df)
+    plot_results(results['portfolio_history'])
 
-def plot_results(df: pd.DataFrame):
-    """Plot backtest results using vectorized operations."""
-    fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(15, 12), gridspec_kw={'height_ratios': [2, 1]})
+def plot_results(portfolio_history: List[Dict[str, Any]]):
+    """Plot portfolio value over time."""
+    df = pd.DataFrame(portfolio_history)
+    df['date'] = pd.to_datetime(df['date'])
+    df.set_index('date', inplace=True)
     
-    # Plot portfolio value and cash
-    ax1.plot(df['date'], df['value'], label='Portfolio Value', color='blue')
-    ax1.plot(df['date'], df['cash'], label='Cash', linestyle='--', color='green')
-    ax1.set_title('Portfolio Value Over Time')
-    ax1.set_xlabel('Date')
-    ax1.set_ylabel('Value ($)')
-    ax1.grid(True)
-    ax1.legend()
+    # Calculate daily returns
+    df['daily_return'] = df['value'].pct_change()
     
-    # Calculate and plot daily returns
-    daily_returns = df['value'].pct_change() * 100
-    ax2.plot(df['date'][1:], daily_returns[1:], label='Daily Returns', color='gray')
-    ax2.set_title('Daily Returns')
-    ax2.set_xlabel('Date')
-    ax2.set_ylabel('Return (%)')
-    ax2.grid(True)
-    ax2.legend()
+    # Create figure with subplots
+    fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(12, 8), height_ratios=[2, 1])
     
+    # Plot portfolio value
+    ax1.plot(df.index, df['value'], color='blue', linewidth=2)
+    ax1.set_title('Portfolio Value Over Time', fontsize=12, pad=10)
+    ax1.set_ylabel('Portfolio Value ($)', fontsize=10)
+    ax1.grid(True, alpha=0.3)
+    ax1.yaxis.set_major_formatter(plt.FuncFormatter(lambda x, p: f'${x:,.0f}'))
+    
+    # Plot daily returns
+    ax2.plot(df.index, df['daily_return'] * 100, color='green', alpha=0.6)
+    ax2.set_title('Daily Returns', fontsize=12, pad=10)
+    ax2.set_ylabel('Daily Return (%)', fontsize=10)
+    ax2.set_xlabel('Date', fontsize=10)
+    ax2.grid(True, alpha=0.3)
+    
+    # Format dates on x-axis
+    plt.gcf().autofmt_xdate()
+    
+    # Adjust layout and display
     plt.tight_layout()
     plt.show()
 
 if __name__ == "__main__":
-    run_backtest()
+    main()
